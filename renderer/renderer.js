@@ -3,11 +3,15 @@
   const { icon } = window.ICONS;
   const cue = window.cue; // exposed by preload
   const $ = (s) => document.querySelector(s);
+  const isMac = cue.platform === 'darwin';
+  const isWindows = cue.platform === 'win32';
+  const primaryKeyLabel = isMac ? 'Command' : 'Ctrl';
+  const hasPrimaryModifier = (event) => isMac ? event.metaKey : event.ctrlKey;
 
   // ---- paint icons -------------------------------------------------------
   $('#logo-btn').innerHTML = icon('logo', { size: 18 });
   $('.tb-hide .chev').innerHTML = icon('chevron-down', { size: 14 });
-  $('#stop-btn').innerHTML = icon('stop-square', { size: 15 });
+  $('#stop-btn .listen-icon').innerHTML = icon('mic', { size: 15 });
   document.querySelector('.act[data-mode="assist"] .ic').innerHTML = icon('sparkles', { size: 16 });
   document.querySelector('.act[data-mode="say"] .ic').innerHTML = icon('wand-sparkles', { size: 16 });
   document.querySelector('.act[data-mode="followup"] .ic').innerHTML = icon('message-circle', { size: 16 });
@@ -15,6 +19,7 @@
   $('#smart-toggle .ic').innerHTML = icon('zap', { size: 14 });
   $('#more-btn').innerHTML = icon('more-horizontal', { size: 18 });
   $('#send-btn').innerHTML = icon('play', { size: 15 });
+  $('#primary-key').textContent = primaryKeyLabel;
 
   // ---- state -------------------------------------------------------------
   let settings = null;
@@ -120,8 +125,10 @@
   }
   $('#send-btn').addEventListener('click', send);
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey) { e.preventDefault(); send(); }
-    if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); runMode('assist', ''); }
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+    if (hasPrimaryModifier(e)) runMode('assist', '');
+    else send();
   });
 
   // Smart toggle
@@ -133,86 +140,204 @@
   });
 
   // Hide / collapse
-  $('#hide-btn').addEventListener('click', () => {
+  const hideBtn = $('#hide-btn');
+  hideBtn.addEventListener('click', () => {
     const collapsed = $('#panel').classList.toggle('collapsed');
-    $('#hide-btn').classList.toggle('collapsed', collapsed);
+    hideBtn.classList.toggle('collapsed', collapsed);
+    $('#hide-label').textContent = collapsed ? 'Unhide' : 'Hide';
+    hideBtn.title = collapsed ? 'Unhide cue panel' : 'Hide cue panel';
+    hideBtn.setAttribute('aria-expanded', String(!collapsed));
     $('#live-dot').style.display = collapsed ? 'none' : '';
   });
 
   // Stop = start/stop listening. Kick off system-audio capture straight from the click so
   // the user-gesture is fresh for getDisplayMedia (loopback capture needs it).
-  $('#stop-btn').addEventListener('click', () => {
-    const turningOn = !$('#stop-btn').classList.contains('active');
-    if (turningOn) startSystemAudio();
-    cue.captureToggle();
+  let captureDesired = false;
+
+  $('#stop-btn').addEventListener('click', async () => {
+    const next = !captureDesired;
+    captureDesired = next;
+    if (next) {
+      setCaptureVisual('starting');
+      // Start directly in the click handler so getDisplayMedia retains its user gesture.
+      const starts = settleCaptureStarts();
+      await cue.captureSet(true);
+      await starts;
+    } else {
+      stopCaptureSources();
+      setCaptureVisual('stopping');
+      await cue.captureSet(false);
+    }
   });
 
   // ---- capture: mic (renderer side) --------------------------------------
-  let audioCtx = null, micStream = null, micNode = null, micProc = null;
+  let audioCtx = null, micStream = null, micNode = null, micProc = null, micStartPromise = null;
   async function startMic() {
-    if (micStream) return;
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
-      audioCtx = new AudioContext({ sampleRate: 16000 });
-      micNode = audioCtx.createMediaStreamSource(micStream);
-      micProc = audioCtx.createScriptProcessor(4096, 1, 1);
-      const sink = audioCtx.createGain(); sink.gain.value = 0; // run processor silently
-      micNode.connect(micProc); micProc.connect(sink); sink.connect(audioCtx.destination);
-      micProc.onaudioprocess = (e) => {
-        const f = e.inputBuffer.getChannelData(0);
-        const out = new Int16Array(f.length);
-        for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-        cue.micPcm(out.buffer);
-      };
-    } catch (err) {
-      cue.log('mic error: ' + (err && err.message));
-    }
+    if (micStream) return true;
+    if (micStartPromise) return micStartPromise;
+    micStartPromise = (async () => {
+      let stream = null;
+      let context = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+        if (!captureDesired) {
+          stream.getTracks().forEach((track) => track.stop());
+          return false;
+        }
+        context = new AudioContext({ sampleRate: 16000 });
+        const node = context.createMediaStreamSource(stream);
+        const processor = context.createScriptProcessor(4096, 1, 1);
+        const sink = context.createGain();
+        sink.gain.value = 0;
+        node.connect(processor); processor.connect(sink); sink.connect(context.destination);
+        processor.onaudioprocess = (event) => sendPcm(event, cue.micPcm);
+        micStream = stream; audioCtx = context; micNode = node; micProc = processor;
+        return true;
+      } catch (err) {
+        if (stream) stream.getTracks().forEach((track) => track.stop());
+        if (context) void context.close();
+        const denied = err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
+        showStatus(denied
+          ? `Microphone access denied. Allow cue in ${isWindows ? 'Windows Privacy settings' : 'System Settings'}.`
+          : `Microphone capture failed: ${(err && err.message) || String(err)}`);
+        cue.log('mic error: ' + (err && err.message));
+        return false;
+      } finally {
+        micStartPromise = null;
+      }
+    })();
+    return micStartPromise;
   }
   function stopMic() {
     if (micProc) { micProc.disconnect(); micProc.onaudioprocess = null; micProc = null; }
     if (micNode) { micNode.disconnect(); micNode = null; }
-    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    if (audioCtx) { void audioCtx.close(); audioCtx = null; }
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
   }
 
   // ---- capture: system/meeting audio (getDisplayMedia loopback, in cue's process) ----
-  let sysStream = null, sysCtx = null, sysNode = null, sysProc = null;
+  let sysStream = null, sysCtx = null, sysNode = null, sysProc = null, sysStartPromise = null;
   async function startSystemAudio() {
-    if (sysStream) return;
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-      stream.getVideoTracks().forEach((t) => t.stop()); // we only want the audio
-      const tracks = stream.getAudioTracks();
-      if (!tracks.length) { cue.log('system audio: no loopback track (macOS loopback unsupported here)'); stream.getTracks().forEach((t) => t.stop()); return; }
-      sysStream = stream;
-      sysCtx = new AudioContext({ sampleRate: 16000 });
-      sysNode = sysCtx.createMediaStreamSource(new MediaStream(tracks));
-      sysProc = sysCtx.createScriptProcessor(4096, 1, 1);
-      const sink = sysCtx.createGain(); sink.gain.value = 0;
-      sysNode.connect(sysProc); sysProc.connect(sink); sink.connect(sysCtx.destination);
-      sysProc.onaudioprocess = (e) => {
-        const f = e.inputBuffer.getChannelData(0);
-        const out = new Int16Array(f.length);
-        for (let i = 0; i < f.length; i++) { const s = Math.max(-1, Math.min(1, f[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-        cue.systemPcm(out.buffer);
-      };
-      cue.log('system audio: capturing loopback');
-    } catch (err) {
-      cue.log('system audio error: ' + (err && err.message));
-    }
+    if (sysStream) return true;
+    if (sysStartPromise) return sysStartPromise;
+    sysStartPromise = (async () => {
+      let stream = null;
+      let context = null;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        stream.getVideoTracks().forEach((track) => track.stop());
+        const tracks = stream.getAudioTracks();
+        if (!tracks.length) {
+          stream.getTracks().forEach((track) => track.stop());
+          showStatus(isWindows
+            ? 'Windows loopback returned no system-audio track. Microphone-only listening can continue.'
+            : 'System-audio loopback is unavailable on this platform. Microphone-only listening can continue.');
+          return false;
+        }
+        if (!captureDesired) {
+          stream.getTracks().forEach((track) => track.stop());
+          return false;
+        }
+        context = new AudioContext({ sampleRate: 16000 });
+        const node = context.createMediaStreamSource(new MediaStream(tracks));
+        const processor = context.createScriptProcessor(4096, 1, 1);
+        const sink = context.createGain();
+        sink.gain.value = 0;
+        node.connect(processor); processor.connect(sink); sink.connect(context.destination);
+        processor.onaudioprocess = (event) => sendPcm(event, cue.systemPcm);
+        sysStream = stream; sysCtx = context; sysNode = node; sysProc = processor;
+        cue.log('system audio: capturing Windows loopback');
+        return true;
+      } catch (err) {
+        if (stream) stream.getTracks().forEach((track) => track.stop());
+        if (context) void context.close();
+        showStatus(`System-audio capture failed: ${(err && err.message) || String(err)}`);
+        cue.log('system audio error: ' + (err && err.message));
+        return false;
+      } finally {
+        sysStartPromise = null;
+      }
+    })();
+    return sysStartPromise;
   }
   function stopSystemAudio() {
     if (sysProc) { sysProc.disconnect(); sysProc.onaudioprocess = null; sysProc = null; }
     if (sysNode) { sysNode.disconnect(); sysNode = null; }
-    if (sysCtx) { sysCtx.close(); sysCtx = null; }
+    if (sysCtx) { void sysCtx.close(); sysCtx = null; }
     if (sysStream) { sysStream.getTracks().forEach((t) => t.stop()); sysStream = null; }
   }
 
-  // ---- events from main --------------------------------------------------
-  cue.on('capture:state', ({ active }) => {
+  function sendPcm(event, destination) {
+    if (!captureDesired) return;
+    const inputSamples = event.inputBuffer.getChannelData(0);
+    const output = new Int16Array(inputSamples.length);
+    for (let i = 0; i < inputSamples.length; i++) {
+      const sample = Math.max(-1, Math.min(1, inputSamples[i]));
+      output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    }
+    destination(output.buffer);
+  }
+
+  function stopCaptureSources() {
+    captureDesired = false;
+    stopMic();
+    stopSystemAudio();
+  }
+
+  function setCaptureVisual(phase, available) {
+    const active = phase === 'active' && available;
+    const button = $('#stop-btn');
+    const states = {
+      inactive: { label: 'Listen', title: 'Start listening' },
+      starting: { label: 'Starting…', title: 'Starting microphone and system audio' },
+      active: { label: 'Stop', title: 'Stop listening' },
+      stopping: { label: 'Finishing…', title: 'Finishing the last transcription' }
+    };
+    const state = states[phase] || states.inactive;
     $('#live-dot').classList.toggle('off', !active);
-    $('#stop-btn').classList.toggle('active', active);
-    if (active) { startMic(); startSystemAudio(); } else { stopMic(); stopSystemAudio(); }
+    button.classList.remove('starting', 'active', 'stopping');
+    if (phase !== 'inactive') button.classList.add(phase);
+    button.title = state.title;
+    button.setAttribute('aria-pressed', String(phase === 'starting' || phase === 'active'));
+    $('#listen-label').textContent = state.label;
+  }
+
+  async function settleCaptureStarts() {
+    const [mic, system] = await Promise.all([startMic(), startSystemAudio()]);
+    if (!captureDesired) return { mic: false, system: false };
+    if (mic && system) showStatus(`Listening with microphone and ${isWindows ? 'Windows ' : ''}system audio.`);
+    else if (mic) showStatus('Listening with microphone only; system audio is unavailable.');
+    else if (system) showStatus('Listening to system audio only; microphone is unavailable.');
+    else {
+      showStatus('Listening could not start: microphone and system audio both failed.');
+      stopCaptureSources();
+      setCaptureVisual('inactive', false);
+      await cue.captureSet(false);
+      return { mic: false, system: false };
+    }
+    setCaptureVisual('active', true);
+    return { mic, system };
+  }
+
+  // ---- events from main --------------------------------------------------
+  cue.on('capture:state', ({ active, stopping, phase }) => {
+    if (active) {
+      // Ignore an older start notification if the user has already requested stop.
+      if (!captureDesired) {
+        void cue.captureSet(false);
+        return;
+      }
+      setCaptureVisual('starting', false);
+      void settleCaptureStarts();
+    } else {
+      stopCaptureSources();
+      if (stopping || phase === 'stopping') {
+        setCaptureVisual('stopping', false);
+        showStatus('Finishing the last transcription...');
+      } else {
+        setCaptureVisual('inactive', false);
+      }
+    }
   });
   cue.on('llm:start', ({ userBubble, small }) => {
     clearMessages();
@@ -255,14 +380,19 @@
     $('#key-openai').value = settings.apiKeys.openai || '';
     $('#key-anthropic').value = settings.apiKeys.anthropic || '';
     $('#key-gemini').value = settings.apiKeys.gemini || '';
+    $('#key-zai').value = settings.apiKeys.zai || '';
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    const transcriptionModels = settings.transcriptionModels || {};
+    $('#stt-openai').value = transcriptionModels.openai || settings.sttModel || 'gpt-4o-mini-transcribe';
+    $('#stt-gemini').value = transcriptionModels.gemini || 'gemini-2.5-flash';
+    $('#stt-zai').value = transcriptionModels.zai || 'glm-asr-2512';
     $('#s-status').textContent = statusText();
   }
   function statusText() {
     const k = settings.apiKeys;
-    const has = [k.openai && 'OpenAI', k.anthropic && 'Anthropic', k.gemini && 'Gemini'].filter(Boolean);
-    const stt = k.openai ? 'Whisper' : (k.gemini ? 'Gemini' : 'none');
+    const has = [k.openai && 'OpenAI', k.anthropic && 'Anthropic', k.gemini && 'Gemini', k.zai && 'Z.AI'].filter(Boolean);
+    const stt = k.openai ? 'OpenAI' : (k.gemini ? 'Gemini' : (k.zai ? 'Z.AI' : 'none'));
     return 'Active: ' + settings.provider + ' · keys: ' + (has.join(', ') || 'none set') + ' · transcription: ' + stt;
   }
   document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', () => {
@@ -276,9 +406,14 @@
     settings.apiKeys.openai = $('#key-openai').value.trim();
     settings.apiKeys.anthropic = $('#key-anthropic').value.trim();
     settings.apiKeys.gemini = $('#key-gemini').value.trim();
+    settings.apiKeys.zai = $('#key-zai').value.trim();
     if (!settings.models[settings.provider]) settings.models[settings.provider] = {};
     settings.models[settings.provider].fast = $('#model-fast').value.trim();
     settings.models[settings.provider].smart = $('#model-smart').value.trim();
+    settings.transcriptionModels = settings.transcriptionModels || {};
+    settings.transcriptionModels.openai = $('#stt-openai').value.trim() || 'gpt-4o-mini-transcribe';
+    settings.transcriptionModels.gemini = $('#stt-gemini').value.trim() || 'gemini-2.5-flash';
+    settings.transcriptionModels.zai = $('#stt-zai').value.trim() || 'glm-asr-2512';
     await cue.settingsSet(settings);
   }
 
@@ -295,7 +430,7 @@
   // ---- global keys -------------------------------------------------------
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !scrim.classList.contains('hidden')) closeSettings();
-    if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); }
+    if (hasPrimaryModifier(e) && e.key === ',') { e.preventDefault(); openSettings(); }
   });
 
   // ---- click-through: only the UI blocks the mouse; empty gaps pass to your screen ----
@@ -310,38 +445,65 @@
 
   // ---- onboarding / first-run tutorial -----------------------------------
   const obScrim = $('#onboard-scrim');
-  const OB_STEPS = [
+  const WINDOWS_ONBOARDING = [
+    {
+      icon: '👋',
+      title: 'Welcome to cue for Windows',
+      body: 'cue is a local personal overlay that can use your screen, microphone, and computer audio to help during meetings or coding. It has no account, server, telemetry, or cloud storage beyond requests sent to the AI provider you choose.'
+    },
+    {
+      icon: '🎙️',
+      title: 'Allow microphone access',
+      body: 'Windows may ask for microphone access when listening starts. If access is blocked, allow microphone access for desktop apps in Windows Privacy settings. Screenshots use Electron display capture and do not require the macOS Screen Recording permission flow.',
+      buttons: [{ label: 'Open Windows microphone settings', action: () => cue.openSettingsDestination('microphone') }]
+    },
+    {
+      icon: '🔊',
+      title: 'Separate meeting audio',
+      body: 'cue captures your microphone as <strong>You</strong> and Windows system output through loopback as <strong>Them</strong>. The channels stay separate. The temporary display video track is stopped immediately, and cue does not play captured audio back through your speakers.'
+    },
+    {
+      icon: '🔑',
+      title: 'Connect an AI provider',
+      body: 'Add your own OpenAI, Anthropic, Gemini, or Z.AI API key. OpenAI, Gemini, and Z.AI can transcribe listening audio; Anthropic can still power screen and coding responses.',
+      buttons: [{ label: 'Open cue Settings', action: () => { finishOnboard(); openSettings(); } }]
+    },
+    {
+      icon: '✨',
+      title: 'You are all set',
+      body: 'Use <span class="kbd">Ctrl</span> <span class="kbd">Enter</span> for Assist, <span class="kbd">Ctrl</span> <span class="kbd">H</span> to solve what is on screen, and <span class="kbd">Ctrl</span> <span class="kbd">,</span> for Settings. Press <span class="kbd">Enter</span> to send or <span class="kbd">Shift</span> <span class="kbd">Enter</span> for a newline. Quit with <span class="kbd">Ctrl</span><span class="kbd">Shift</span><span class="kbd">X</span>.<br><br>Click the cue logo to reopen this guide. Capture exclusion is best-effort and must be tested with each recording or meeting application.'
+    }
+  ];
+
+  const MAC_ONBOARDING = [
     {
       icon: '👋',
       title: 'Welcome to cue',
-      body: 'cue is a private AI copilot that floats over your screen. It can <strong>see your screen</strong>, <strong>hear your meetings</strong>, and help you answer questions or solve coding problems — while staying hidden from most screen shares.<br><br>This quick guide gets you running in about a minute.'
+      body: 'cue is a private AI copilot that floats over your screen and uses your own provider keys.'
     },
     {
       icon: '🔐',
-      title: 'Allow cue to see & hear',
-      body: 'cue needs two macOS permissions. Click each button, turn <strong>cue</strong> ON in the window that opens, then come back here.<ul><li><strong>Microphone</strong> — to hear you</li><li><strong>Screen Recording</strong> — to see your screen and hear meeting audio</li></ul>',
+      title: 'Allow cue to see and hear',
+      body: 'Allow Microphone and Screen Recording access for cue in macOS System Settings.',
       buttons: [
-        { label: 'Open Microphone settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone') },
-        { label: 'Open Screen Recording settings', action: () => cue.openPane('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture') }
+        { label: 'Open Microphone settings', action: () => cue.openSettingsDestination('microphone') },
+        { label: 'Open Screen Recording settings', action: () => cue.openSettingsDestination('screen') }
       ]
     },
     {
       icon: '🔑',
       title: 'Connect an AI provider',
-      body: 'cue uses <strong>your own</strong> API key — pick <span class="hl">OpenAI</span>, <span class="hl">Anthropic</span>, or <span class="hl">Google Gemini</span>. Get a key from your provider, then paste it into cue\'s Settings.<br><br><strong>Tip:</strong> the listening features need speech-to-text access (an OpenAI key with Whisper, or a Gemini key). A chat-only key still powers screen &amp; coding help.',
+      body: 'Add your own OpenAI, Anthropic, Gemini, or Z.AI key in cue Settings.',
       buttons: [{ label: 'Open cue Settings', action: () => { finishOnboard(); openSettings(); } }]
     },
     {
-      icon: '🫥',
-      title: 'Stay hidden in Zoom',
-      body: 'cue is hidden from most screen shares automatically (Google Meet, Teams, QuickTime — nothing to do). <strong>Zoom needs one setting:</strong><br><br>Zoom → <span class="hl">Settings</span> → <span class="hl">Share Screen</span> → <span class="hl">Advanced</span> → <strong>Screen capture mode</strong> → choose <strong>“Advanced capture with window filtering.”</strong><br><br>Avoid “<strong>without</strong> window filtering” — that mode reveals cue.'
-    },
-    {
       icon: '✨',
-      title: 'You’re all set',
-      body: 'How to use cue:<ul><li><span class="kbd">⌘</span> <span class="kbd">↵</span> — <strong>Assist</strong> with whatever\'s on screen or being said</li><li><span class="kbd">⌘</span> <span class="kbd">H</span> — solve a coding problem on screen</li><li>Click <strong>▢</strong> in the top bar to start listening to a meeting</li><li>Type a question and press <span class="kbd">↵</span></li></ul>Reopen this guide anytime by clicking the <strong>cue logo</strong>. Quit with <span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">X</span>.'
+      title: 'You are all set',
+      body: 'Use <span class="kbd">Command</span> <span class="kbd">Enter</span> for Assist and <span class="kbd">Command</span> <span class="kbd">H</span> to solve what is on screen. Click the cue logo to reopen this guide. Capture exclusion remains best-effort.'
     }
   ];
+
+  const OB_STEPS = isWindows ? WINDOWS_ONBOARDING : MAC_ONBOARDING;
   let obIndex = 0;
   function renderOnboard() {
     const step = OB_STEPS[obIndex];
@@ -373,8 +535,9 @@
     showExample();
     syncPlaceholder();
     const st = await cue.captureState();
-    $('#live-dot').classList.toggle('off', !st.active);
-    $('#stop-btn').classList.toggle('active', st.active);
+    captureDesired = !!st.active;
+    setCaptureVisual(st.active ? 'starting' : 'inactive', false);
+    if (st.active) void settleCaptureStarts();
     if (!settings.onboarded) showOnboard();
   })();
 })();

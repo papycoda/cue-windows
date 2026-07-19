@@ -1,4 +1,4 @@
-// LLM factory — OpenAI / Anthropic / Gemini behind one streaming interface.
+// LLM factory — OpenAI / Anthropic / Gemini / Z.AI behind one streaming interface.
 // stream({ system, turns:[{role,text}], imageDataUrl, maxTokens, onToken }) -> Promise<fullText>
 
 function stripDataUrl(dataUrl) {
@@ -6,9 +6,9 @@ function stripDataUrl(dataUrl) {
   return m ? { mime: m[1], b64: m[2] } : null;
 }
 
-async function streamOpenAI({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamOpenAICompatible({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken }) {
   const OpenAI = require('openai');
-  const client = new OpenAI({ apiKey });
+  const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   const messages = [{ role: 'system', content: system }];
   turns.forEach((t, i) => {
     const last = i === turns.length - 1;
@@ -88,7 +88,8 @@ function createLLM(settings) {
     ready: !!apiKey && !!model,
     async stream(params) {
       const args = { apiKey, model, maxTokens, ...params };
-      if (provider === 'openai') return streamOpenAI(args);
+      if (provider === 'openai') return streamOpenAICompatible(args);
+      if (provider === 'zai') return streamOpenAICompatible({ ...args, baseURL: 'https://api.z.ai/api/paas/v4/' });
       if (provider === 'anthropic') return streamAnthropic(args);
       if (provider === 'gemini') return streamGemini(args);
       throw new Error('unknown provider: ' + provider);

@@ -3,20 +3,20 @@
 // fall back across providers. Returns { text, provider } or { text:'', error }.
 const { pcmToWav } = require('./wav');
 
-async function transcribeOpenAI(apiKey, wav, model) {
+async function transcribeOpenAICompatible(apiKey, wav, model, baseURL) {
   const OpenAI = require('openai');
   const toFile = OpenAI.toFile || require('openai/uploads').toFile;
-  const client = new OpenAI({ apiKey });
+  const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
   const file = await toFile(wav, 'audio.wav', { type: 'audio/wav' });
   const res = await client.audio.transcriptions.create({ file, model: model || 'whisper-1' });
   return (res.text || '').trim();
 }
 
-async function transcribeGemini(apiKey, wav) {
+async function transcribeGemini(apiKey, wav, model) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
   const res = await ai.models.generateContent({
-    model: 'gemini-1.5-flash',
+    model: model || 'gemini-2.5-flash',
     contents: [{ role: 'user', parts: [
       { text: 'Transcribe this audio verbatim. Return only the spoken words with no commentary. If there is no clear speech, return an empty response.' },
       { inlineData: { mimeType: 'audio/wav', data: wav.toString('base64') } }
@@ -27,9 +27,11 @@ async function transcribeGemini(apiKey, wav) {
 
 function createSTT(settings) {
   const keys = settings.apiKeys || {};
+  const models = settings.transcriptionModels || {};
   const chain = [];
-  if (keys.openai) chain.push({ p: 'openai', fn: (wav) => transcribeOpenAI(keys.openai, wav, settings.sttModel) });
-  if (keys.gemini) chain.push({ p: 'gemini', fn: (wav) => transcribeGemini(keys.gemini, wav) });
+  if (keys.openai) chain.push({ p: 'openai', fn: (wav) => transcribeOpenAICompatible(keys.openai, wav, models.openai || settings.sttModel || 'gpt-4o-mini-transcribe') });
+  if (keys.gemini) chain.push({ p: 'gemini', fn: (wav) => transcribeGemini(keys.gemini, wav, models.gemini || 'gemini-2.5-flash') });
+  if (keys.zai) chain.push({ p: 'zai', fn: (wav) => transcribeOpenAICompatible(keys.zai, wav, models.zai || 'glm-asr-2512', 'https://api.z.ai/api/paas/v4/') });
 
   return {
     available: chain.length > 0,

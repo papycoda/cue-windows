@@ -1,21 +1,44 @@
-// Full-resolution screenshot via desktopCapturer (main process).
-// First call triggers the macOS Screen-Recording permission prompt for the app.
 const { desktopCapturer, screen } = require('electron');
+
+function thumbnailSize(display) {
+  const scale = display.scaleFactor || 1;
+  return {
+    width: Math.max(1, Math.floor(display.size.width * scale)),
+    height: Math.max(1, Math.floor(display.size.height * scale))
+  };
+}
+
+function findDisplaySource(sources, display) {
+  return sources.find((source) => String(source.display_id) === String(display.id));
+}
+
+async function sourcesFor(display) {
+  return desktopCapturer.getSources({ types: ['screen'], thumbnailSize: thumbnailSize(display) });
+}
 
 async function captureScreenshot() {
   const primary = screen.getPrimaryDisplay();
-  const { width, height } = primary.size;
-  const scale = primary.scaleFactor || 1;
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: { width: Math.floor(width * scale), height: Math.floor(height * scale) }
-  });
+  let selected = primary;
+  try {
+    selected = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()) || primary;
+  } catch {
+    selected = primary;
+  }
+
+  let sources = await sourcesFor(selected);
   if (!sources.length) return null;
-  // Prefer the primary display source.
-  const src = sources.find((s) => String(s.display_id) === String(primary.id)) || sources[0];
-  const img = src.thumbnail;
-  if (!img || img.isEmpty()) return null;
-  return img.toDataURL(); // data:image/png;base64,...
+  let source = findDisplaySource(sources, selected);
+
+  if (!source && String(selected.id) !== String(primary.id)) {
+    const primarySources = await sourcesFor(primary);
+    source = findDisplaySource(primarySources, primary);
+    if (source) sources = primarySources;
+  }
+  source = source || findDisplaySource(sources, primary) || sources[0];
+
+  const image = source && source.thumbnail;
+  if (!image || image.isEmpty()) return null;
+  return image.toDataURL();
 }
 
 module.exports = { captureScreenshot };

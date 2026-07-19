@@ -82,7 +82,7 @@ const MODES = {
     }
   },
 
-  // Explicit LeetCode/coding screenshot solver (Cmd+H). Screen only.
+  // Explicit LeetCode/coding screenshot solver (Ctrl+H on Windows, Command+H on macOS). Screen only.
   leetcode: {
     needsScreen: true,
     userBubble: 'Solve what\'s on screen',

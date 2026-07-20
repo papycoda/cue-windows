@@ -14,6 +14,7 @@ const state = { capturing: false, stopping: false, busy: false, transcribing: { 
 let sttDisabled = false;
 const buffers = { you: [], them: [] };
 const transcriptionPromises = { you: null, them: null };
+const transcriptionControllers = { you: null, them: null };
 const transcript = [];
 const FLUSH_MS = 3500;
 const FINAL_FLUSH_TIMEOUT_MS = 10000;
@@ -96,6 +97,8 @@ function flushChannel(channel) {
   if (pcm.length < MIN_BYTES || rms16(pcm) < RMS_GATE) return Promise.resolve();
 
   state.transcribing[channel] = true;
+  const controller = new AbortController();
+  transcriptionControllers[channel] = controller;
   let pending = null;
   pending = (async () => {
     try {
@@ -108,7 +111,8 @@ function flushChannel(channel) {
         }
         return;
       }
-      const res = await stt.transcribe(pcm);
+      const res = await stt.transcribe(pcm, { signal: controller.signal });
+      if (res.aborted) return;
       if (res.error) {
         handleSttError(res.error);
         return;
@@ -126,6 +130,7 @@ function flushChannel(channel) {
         state.transcribing[channel] = false;
         transcriptionPromises[channel] = null;
       }
+      if (transcriptionControllers[channel] === controller) transcriptionControllers[channel] = null;
     }
   })();
   transcriptionPromises[channel] = pending;
@@ -160,16 +165,25 @@ function stopFlushLoop() {
 }
 
 async function flushFinalAudio() {
+  let cancelled = false;
   const settleAndFlush = async () => {
     await Promise.allSettled(Object.values(transcriptionPromises).filter(Boolean));
+    if (cancelled) return;
     await Promise.allSettled([flushChannel('you'), flushChannel('them')]);
   };
   const result = await withTimeout(settleAndFlush(), FINAL_FLUSH_TIMEOUT_MS);
   if (result && result.timedOut) {
+    cancelled = true;
     console.log(`[cue] final transcription wait exceeded ${FINAL_FLUSH_TIMEOUT_MS}ms`);
-    send('status', { message: 'Stopped listening; a final transcription request is still finishing.' });
+    const pending = Object.values(transcriptionPromises).filter(Boolean);
+    for (const controller of Object.values(transcriptionControllers)) {
+      if (controller) controller.abort();
+    }
+    await withTimeout(Promise.allSettled(pending), 1000);
+    send('status', { message: 'Stopped listening; the final transcription timed out and was cancelled.' });
     for (const channel of ['you', 'them']) {
       transcriptionPromises[channel] = null;
+      transcriptionControllers[channel] = null;
       state.transcribing[channel] = false;
     }
   }
@@ -336,6 +350,9 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   stopFlushLoop();
+  for (const controller of Object.values(transcriptionControllers)) {
+    if (controller) controller.abort();
+  }
   globalShortcut.unregisterAll();
 });
 app.on('window-all-closed', () => app.quit());

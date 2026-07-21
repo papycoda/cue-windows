@@ -1,14 +1,17 @@
 {
   "name": "cue",
   "version": "0.1.0",
-  "description": "Open-source macOS invisible AI overlay — three separate inputs (screen, mic, system audio) into an LLM. A Cluely-style copilot for meetings and coding problems.",
+  "description": "Personal Windows AI overlay with separate screen, microphone, and system-audio inputs.",
   "license": "GPL-3.0-or-later",
   "author": "cue",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/renderer.js && node --check renderer/icons.js && node --check src/llm.js && node --check src/prompts.js && node --check src/screen.js && node --check src/store.js && node --check src/stt.js && node --check src/wav.js",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --mac zip"
+    "dist": "electron-builder --mac zip",
+    "pack:win": "electron-builder --win --x64 --dir",
+    "dist:win": "electron-builder --win portable --x64"
   },
   "build": {
     "appId": "com.cue.overlay",
@@ -20,6 +23,18 @@
       "src/**/*",
       "renderer/**/*"
     ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "cue-${version}-portable-${arch}.${ext}"
+    },
     "mac": {
       "target": [
         "dir"
@@ -41,8 +56,8 @@
     "overlay",
     "ai",
     "assistant",
-    "screencapturekit",
-    "macos"
+    "windows",
+    "loopback-audio"
   ],
   "devDependencies": {
     "electron": "33.2.1",

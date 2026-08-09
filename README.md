@@ -1,6 +1,8 @@
 # cue for Windows
 
-cue is a small personal Electron overlay for Windows. It stays above normal applications and combines three separate inputs:
+This repository is a **Windows port and extension of [Blueturboguy07/cue](https://github.com/Blueturboguy07/cue)**, the open-source Cue overlay. The upstream project targets macOS; this fork adapts the application for Windows and adds Windows-specific screen, audio, shortcut, packaging, and provider behavior.
+
+cue for Windows is a small personal Electron overlay. It stays above normal applications and combines three separate inputs:
 
 - the display under the mouse cursor, captured only when a screen-aware feature runs;
 - your microphone, labelled `You`;
